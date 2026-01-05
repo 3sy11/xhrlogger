@@ -1,0 +1,20 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { width: 280px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 13px; color: #333; background: #f8f9fa; }
+.container { display: flex; flex-direction: column; }
+header { background: linear-gradient(135deg, #0d6efd 0%, #0a58ca 100%); color: white; padding: 10px 16px; }
+header h1 { font-size: 15px; font-weight: 600; }
+main { padding: 12px; }
+.actions-section { display: flex; flex-direction: column; gap: 8px; }
+.btn { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 8px 12px; border: none; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.2s; }
+.btn:hover { transform: translateY(-1px); box-shadow: 0 3px 8px rgba(0,0,0,0.15); }
+.btn:active { transform: translateY(0); }
+.btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+.btn-icon { font-size: 14px; }
+.btn-primary { background: linear-gradient(135deg, #0d6efd 0%, #0a58ca 100%); color: white; }
+.btn-success { background: linear-gradient(135deg, #198754 0%, #146c43 100%); color: white; }
+.btn-subscribe { background: linear-gradient(135deg, #6f42c1 0%, #59359a 100%); color: white; }
+.message { display: none; margin-top: 10px; padding: 8px 12px; border-radius: 6px; font-size: 12px; animation: slideIn 0.2s ease; }
+@keyframes slideIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+.message-success { display: block; background: #d1e7dd; color: #0f5132; }
+.message-error { display: block; background: #f8d7da; color: #842029; }
+.message-info { display: block; background: #cff4fc; color: #055160; }

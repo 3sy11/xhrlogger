@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>XHR Logger</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <header><h1>XHR Logger</h1></header>
+    <main>
+      <div class="actions-section">
+        <button id="dashboard-btn" class="btn btn-primary"><span class="btn-icon">🔍</span><span>打开 Dashboard</span></button>
+        <button id="save-html-btn" class="btn btn-success"><span class="btn-icon">📄</span><span>保存页面源码</span></button>
+        <button id="subscribe-page-btn" class="btn btn-subscribe"><span class="btn-icon">📌</span><span>添加当前页面到订阅</span></button>
+      </div>
+      <div class="message" id="message"></div>
+    </main>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

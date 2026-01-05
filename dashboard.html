@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>XHR Logger - Dashboard</title>
+  <link rel="stylesheet" href="dashboard.css">
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="header-left">
+        <h1>🔍 XHR Logger</h1>
+        <div class="tabs">
+          <button class="tab active" data-tab="monitor">📊 看板</button>
+          <button class="tab" data-tab="subscriptions">📌 订阅管理</button>
+        </div>
+      </div>
+      <div class="header-right" id="monitor-controls">
+        <span class="badge" id="log-count">0 请求</span>
+        <button id="pause-btn" class="btn btn-pause">⏸️ 暂停</button>
+        <input type="text" id="search-input" class="search-input" placeholder="搜索 URL / Method / Status...">
+        <select id="filter-method" class="filter-select">
+          <option value="">全部方法</option>
+          <option value="GET">GET</option>
+          <option value="POST">POST</option>
+          <option value="PUT">PUT</option>
+          <option value="DELETE">DELETE</option>
+          <option value="PATCH">PATCH</option>
+        </select>
+        <select id="filter-status" class="filter-select">
+          <option value="">全部状态</option>
+          <option value="2xx">2xx 成功</option>
+          <option value="3xx">3xx 重定向</option>
+          <option value="4xx">4xx 客户端错误</option>
+          <option value="5xx">5xx 服务端错误</option>
+        </select>
+        <button id="clear-btn" class="btn btn-danger">🗑️ 清空</button>
+        <button id="export-btn" class="btn btn-primary">📥 导出</button>
+      </div>
+      <div class="header-right hidden" id="subscription-controls">
+        <span class="badge" id="sub-count">0 订阅</span>
+        <button id="collector-config-btn" class="btn btn-secondary">⚙️ 上报配置</button>
+        <button id="import-sub-btn" class="btn btn-secondary">📂 导入</button>
+        <button id="export-sub-btn" class="btn btn-secondary">💾 导出</button>
+        <button id="add-sub-btn" class="btn btn-primary">+ 新增订阅</button>
+        <input type="file" id="import-file-input" accept=".json" style="display:none">
+      </div>
+    </header>
+    
+    <!-- 看板 Tab -->
+    <main class="main tab-content active" id="tab-monitor">
+      <div class="request-list" id="request-list"></div>
+      <div class="detail-panel" id="detail-panel">
+        <div class="detail-placeholder">选择一个请求查看详情</div>
+      </div>
+    </main>
+    
+    <!-- 订阅管理 Tab -->
+    <main class="main tab-content" id="tab-subscriptions">
+      <div class="subscription-list-panel" id="subscription-list-panel">
+        <div class="panel-header">订阅列表</div>
+        <div class="subscription-list" id="subscription-list"></div>
+      </div>
+      <div class="subscription-detail-panel" id="subscription-detail-panel">
+        <div class="panel-header" id="sub-detail-title">订阅详情</div>
+        <div class="subscription-form" id="subscription-form">
+          <div class="form-placeholder">选择一个订阅查看详情，或点击「新增订阅」创建</div>
+        </div>
+      </div>
+    </main>
+  </div>
+  
+  <!-- 上报配置 Modal -->
+  <div class="modal-overlay" id="collector-modal-overlay">
+    <div class="modal modal-edit">
+      <div class="modal-header">
+        <h2>⚙️ 上报配置</h2>
+        <button class="modal-close" id="collector-modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>上报地址</label>
+          <input type="text" class="form-input" id="collector-endpoint" placeholder="https://172.27.0.101:8443/collect">
+          <div style="margin-top:8px;padding:8px;background:#fff3cd;border-radius:4px;font-size:12px;color:#856404">
+            ⚠️ 使用自签证书时，需要先访问 <a href="#" id="test-cert-link" style="color:#0066cc;text-decoration:underline">测试地址</a> 并信任证书
+          </div>
+        </div>
+        <div class="form-group">
+          <label>
+            <input type="checkbox" id="collector-enabled" style="width:auto;margin-right:6px">
+            启用自动上报
+          </label>
+        </div>
+        <div class="form-info">
+          <div class="info-title">💡 说明</div>
+          <div class="info-row"><span class="info-value">• 命中订阅时会自动上报数据到此地址</span></div>
+          <div class="info-row"><span class="info-value">• API 订阅上报请求/响应 JSON</span></div>
+          <div class="info-row"><span class="info-value">• 页面订阅上报 HTML 内容</span></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="collector-cancel-btn">取消</button>
+        <button class="btn btn-primary" id="collector-save-btn">保存</button>
+      </div>
+    </div>
+  </div>
+  <script src="dashboard.js"></script>
+</body>
+</html>
