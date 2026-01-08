@@ -57,7 +57,8 @@ document.addEventListener('DOMContentLoaded', function() {
         matchMode: 'exact',
         urlPattern: url.origin + url.pathname,
         queryPattern: url.search ? url.search.slice(1) : '',
-        method: ''
+        method: '',
+        reportEnabled: true
       };
       chrome.runtime.sendMessage({ type: 'ADD_SUBSCRIPTION', subscription }, response => {
         if (response?.success) showMessage('页面已添加到订阅！', 'success');

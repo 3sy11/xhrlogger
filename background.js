@@ -19,7 +19,7 @@ async function saveSubscriptions(subscriptions) {
 
 async function addSubscription(sub) {
   const subs = await getSubscriptions();
-  const newSub = { id: generateId(), ...sub, enabled: true, createdAt: Date.now() };
+  const newSub = { id: generateId(), ...sub, enabled: true, reportEnabled: true, createdAt: Date.now() };
   subs.push(newSub);
   await saveSubscriptions(subs);
   return { success: true, subscription: newSub };
@@ -88,7 +88,12 @@ async function checkApiSubscription(logData) {
       sub.lastMatchedUrl = logData.url;
       sub.lastMatchedAt = new Date().toISOString();
       await saveSubscriptions(subs);
-      await saveApiLog(logData, sub);
+      // 检查上报开关
+      if (sub.reportEnabled !== false) {
+        await saveApiLog(logData, sub);
+      } else {
+        console.log(`[Background] ⏭️  订阅「${sub.name}」上报已关闭，跳过上报`);
+      }
       return true;
     }
   }
@@ -105,6 +110,11 @@ async function checkPageSubscription(pageUrl, updateMatch = false) {
         sub.lastMatchedUrl = pageUrl;
         sub.lastMatchedAt = new Date().toISOString();
         await saveSubscriptions(subs);
+      }
+      // 检查上报开关
+      if (sub.reportEnabled === false) {
+        console.log(`[Background] ⏭️  订阅「${sub.name}」上报已关闭，跳过上报`);
+        return null;
       }
       return sub;
     }

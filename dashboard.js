@@ -95,7 +95,19 @@ function filterLogs() {
     return true;
   });
   renderList();
-  $('log-count').textContent = `${filteredLogs.length} 请求${isPaused ? ' (已暂停)' : ''}`;
+  const isFiltered = search || method || status;
+  const countText = `${filteredLogs.length} 请求${isPaused ? ' (已暂停)' : ''}`;
+  $('log-count').textContent = countText;
+  
+  // 更新导出按钮文本
+  const exportBtn = $('export-btn');
+  if (isFiltered && filteredLogs.length !== logs.length) {
+    exportBtn.textContent = `📥 导出 (${filteredLogs.length})`;
+    exportBtn.title = `导出过滤后的 ${filteredLogs.length} 条请求（共 ${logs.length} 条）`;
+  } else {
+    exportBtn.textContent = '📥 导出';
+    exportBtn.title = `导出全部 ${logs.length} 条请求`;
+  }
 }
 
 function formatSize(bytes) {
@@ -193,10 +205,47 @@ function clearLogs() {
 }
 
 function exportLogs() {
-  const blob = new Blob([JSON.stringify(logs, null, 2)], { type: 'application/json' });
+  // 导出当前过滤筛选后的结果
+  const logsToExport = filteredLogs.length > 0 ? filteredLogs : logs;
+  const searchTerm = $('search-input').value.trim();
+  const methodFilter = $('filter-method').value;
+  const statusFilter = $('filter-status').value;
+  
+  // 生成文件名，包含过滤条件
+  let filename = 'xhr-logs';
+  if (searchTerm || methodFilter || statusFilter) {
+    filename += '-filtered';
+    if (methodFilter) filename += `-${methodFilter}`;
+    if (statusFilter) filename += `-${statusFilter}`;
+  }
+  filename += `-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}.json`;
+  
+  // 导出数据，包含元信息
+  const exportData = {
+    exportTime: new Date().toISOString(),
+    totalLogs: logs.length,
+    filteredLogs: logsToExport.length,
+    filters: {
+      search: searchTerm || null,
+      method: methodFilter || null,
+      status: statusFilter || null
+    },
+    logs: logsToExport
+  };
+  
+  const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
-  const a = document.createElement('a'); a.href = url; a.download = `xhr-logs-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}.json`; a.click();
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
   URL.revokeObjectURL(url);
+  
+  // 提示信息
+  const msg = logsToExport.length === logs.length 
+    ? `已导出全部 ${logsToExport.length} 条请求` 
+    : `已导出过滤后的 ${logsToExport.length} 条请求（共 ${logs.length} 条）`;
+  console.log(`[Dashboard] ${msg}`);
 }
 
 // ==================== 订阅管理 ====================
@@ -216,7 +265,10 @@ function renderSubscriptionList() {
     <div class="subscription-item${sub.enabled ? '' : ' disabled'}${selectedSubId === sub.id ? ' active' : ''}" data-id="${sub.id}">
       <div class="sub-toggle${sub.enabled ? ' active' : ''}" data-action="toggle-sub" data-id="${sub.id}"></div>
       <div class="sub-info">
-        <div class="sub-name">${escapeHtml(sub.name)}</div>
+        <div class="sub-name">
+          ${escapeHtml(sub.name)}
+          ${sub.reportEnabled === false ? '<span class="report-badge disabled">上报关闭</span>' : '<span class="report-badge">上报开启</span>'}
+        </div>
         ${sub.description ? `<div class="sub-desc">${escapeHtml(sub.description)}</div>` : ''}
         <div class="sub-pattern">${escapeHtml(sub.urlPattern)}</div>
         <div class="sub-tags">
@@ -246,7 +298,7 @@ function selectSubscription(id) {
 function addNewSubscription() {
   selectedSubId = null; isNewSub = true;
   document.querySelectorAll('.subscription-item').forEach(el => el.classList.remove('active'));
-  renderSubscriptionForm({ name: '', description: '', type: 'api', matchMode: 'exact', urlPattern: '', queryPattern: '', method: '', enabled: true });
+  renderSubscriptionForm({ name: '', description: '', type: 'api', matchMode: 'exact', urlPattern: '', queryPattern: '', method: '', enabled: true, reportEnabled: true });
 }
 
 function renderSubscriptionForm(sub) {
@@ -271,6 +323,13 @@ function renderSubscriptionForm(sub) {
     <div class="form-group"><label>URL 路径模式</label><input type="text" class="form-input" id="form-url-pattern" value="${escapeHtml(sub.urlPattern)}" placeholder="https://example.com/api/path"></div>
     <div class="form-group"><label>查询参数模式（可选）</label><input type="text" class="form-input" id="form-query-pattern" value="${escapeHtml(sub.queryPattern)}" placeholder="key=value 或正则表达式"></div>
     <div class="form-group" id="form-method-group" style="display:${methodDisplay}"><label>请求方法（可选）</label><select class="form-select" id="form-method"><option value="">全部方法</option><option value="GET"${sub.method === 'GET' ? ' selected' : ''}>GET</option><option value="POST"${sub.method === 'POST' ? ' selected' : ''}>POST</option><option value="PUT"${sub.method === 'PUT' ? ' selected' : ''}>PUT</option><option value="DELETE"${sub.method === 'DELETE' ? ' selected' : ''}>DELETE</option><option value="PATCH"${sub.method === 'PATCH' ? ' selected' : ''}>PATCH</option></select></div>
+    <div class="form-group report-toggle-group">
+      <label class="toggle-label">
+        <input type="checkbox" id="form-report-enabled" ${sub.reportEnabled !== false ? 'checked' : ''}>
+        <span class="toggle-text">启用自动上报</span>
+        <span class="toggle-hint">关闭后订阅仍会生效，但不会上报数据</span>
+      </label>
+    </div>
     ${lastMatchInfo}
     <div class="form-actions">${isNewSub ? '' : '<button class="btn btn-danger" data-action="delete-sub">删除</button>'}<button class="btn btn-success" data-action="save-sub">保存</button></div>
   `;
@@ -298,7 +357,8 @@ function saveSubscription() {
     matchMode: $('form-match-mode')?.value || 'exact',
     urlPattern: $('form-url-pattern')?.value.trim() || '',
     queryPattern: $('form-query-pattern')?.value.trim() || '',
-    method: $('form-type')?.value === 'api' ? ($('form-method')?.value || '') : ''
+    method: $('form-type')?.value === 'api' ? ($('form-method')?.value || '') : '',
+    reportEnabled: $('form-report-enabled')?.checked !== false
   };
   if (!sub.urlPattern) { alert('请输入 URL 路径模式'); return; }
   
