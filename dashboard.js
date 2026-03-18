@@ -1,7 +1,25 @@
 // XHR Logger - Dashboard
 let logs = [], filteredLogs = [], selectedLogId = null, isPaused = false, refreshTimer = null;
 let subscriptions = [], selectedSubId = null, isNewSub = false;
+let logStorageConfig = { defaultPath: 'xhr-logs', domainEnabled: {}, logFlushEnabled: false };
+let selectedLogDomain = null;
+let logDirectoryHandle = null;
+let expandedLogIdInDetail = null;
+let flushPort = null;
+const appendQueue = {};
+const domainWriting = {};
+const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const $ = id => document.getElementById(id);
+
+function getPrimaryDomain(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (host === 'localhost' || host.startsWith('127.')) return host;
+    const parts = host.split('.');
+    if (parts.length >= 2) return parts.slice(-2).join('.');
+    return host;
+  } catch { return 'unknown'; }
+}
 
 function init() {
   chrome.runtime.sendMessage({ type: 'GET_PAUSE_STATE' }, response => {
@@ -41,8 +59,16 @@ function init() {
   $('collector-cancel-btn').addEventListener('click', closeCollectorConfig);
   $('collector-save-btn').addEventListener('click', saveCollectorConfig);
   
+  // 日志管理
+  $('log-flush-enabled-toggle').addEventListener('click', toggleLogFlushEnabled);
+  $('log-pick-dir-btn').addEventListener('click', pickLogDirectory);
+  $('log-export-disk-btn').addEventListener('click', exportLogsToDisk);
+  $('log-domain-list').addEventListener('click', handleLogDomainListClick);
+  $('log-by-domain-list').addEventListener('click', handleLogByDomainRowClick);
   // URL hash 检测
   if (location.hash === '#subscriptions') switchTab('subscriptions');
+  if (location.hash === '#logs') switchTab('logs');
+  window.addEventListener('beforeunload', () => { disconnectFlushPort(); });
 }
 
 function switchTab(tabId) {
@@ -50,7 +76,10 @@ function switchTab(tabId) {
   document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === `tab-${tabId}`));
   $('monitor-controls').classList.toggle('hidden', tabId !== 'monitor');
   $('subscription-controls').classList.toggle('hidden', tabId !== 'subscriptions');
+  $('log-controls').classList.toggle('hidden', tabId !== 'logs');
   if (tabId === 'subscriptions') { loadSubscriptions(); renderSubscriptionList(); }
+  if (tabId === 'logs') { loadLogStorageConfig(); selectedLogDomain = null; updateFlushConnection(); }
+  else updateFlushConnection();
 }
 
 function startRefresh() {
@@ -76,6 +105,8 @@ function loadLogs() {
       if (response.isPaused !== undefined && response.isPaused !== isPaused) { isPaused = response.isPaused; updatePauseButton(); }
       const newLogs = response.logs || [];
       if (JSON.stringify(newLogs.map(l => l.id)) !== JSON.stringify(logs.map(l => l.id))) { logs = newLogs; filterLogs(); }
+      if ($('tab-logs')?.classList.contains('active')) { renderLogDomainList(); renderLogByDomainList(); }
+      if (logDirectoryHandle && logStorageConfig.logFlushEnabled !== false && !flushPort) updateFlushConnection();
     }
   });
 }
@@ -522,6 +553,241 @@ function saveCollectorConfig() {
       closeCollectorConfig();
     } else { alert('保存失败'); }
   });
+}
+
+// ==================== 日志管理 ====================
+
+function loadLogStorageConfig() {
+  chrome.runtime.sendMessage({ type: 'GET_LOG_STORAGE_CONFIG' }, response => {
+    if (response?.success) { logStorageConfig = response.config || { defaultPath: 'xhr-logs', domainEnabled: {}, logFlushEnabled: false }; updateLogPathDisplay(); updateLogFlushToggle(); renderLogDomainList(); renderLogByDomainList(); updateFlushConnection(); }
+  });
+}
+
+function updateLogPathDisplay() {
+  const el = $('log-path-display');
+  if (!el) return;
+  if (logDirectoryHandle) el.textContent = `已选目录: ${logDirectoryHandle.name}`;
+  else el.textContent = logStorageConfig.logFlushEnabled !== false ? '请选择目录以开始落盘' : '默认: 下载目录/xhr-logs';
+}
+
+function updateLogFlushToggle() {
+  const el = $('log-flush-enabled-toggle');
+  if (!el) return;
+  const on = logStorageConfig.logFlushEnabled !== false;
+  el.classList.toggle('active', on);
+}
+
+function toggleLogFlushEnabled(e) {
+  e.stopPropagation();
+  const next = logStorageConfig.logFlushEnabled === false;
+  logStorageConfig.logFlushEnabled = next;
+  chrome.runtime.sendMessage({ type: 'SET_LOG_FLUSH_ENABLED', enabled: next }, () => {
+    updateLogFlushToggle();
+    updateFlushConnection();
+    updateLogPathDisplay();
+    if (next && !logDirectoryHandle) alert('请点击「选择目录」指定落盘位置后，落盘才会开始。');
+  });
+}
+
+function connectFlushPort() {
+  if (flushPort || !logDirectoryHandle || logStorageConfig.logFlushEnabled === false) return;
+  flushPort = chrome.runtime.connect({ name: 'log-flush' });
+  chrome.runtime.sendMessage({ type: 'SET_SILENT_FLUSH_ACTIVE', active: true }).catch(() => {});
+  flushPort.onMessage.addListener(msg => {
+    if (msg.type === 'APPEND_LOG' && msg.log) { const d = getPrimaryDomain(msg.log.url); if (!appendQueue[d]) appendQueue[d] = []; appendQueue[d].push(msg.log); processAppendQueue(d); }
+  });
+  flushPort.onDisconnect.addListener(() => { flushPort = null; chrome.runtime.sendMessage({ type: 'SET_SILENT_FLUSH_ACTIVE', active: false }).catch(() => {}); });
+}
+
+function disconnectFlushPort() {
+  if (flushPort) { try { flushPort.disconnect(); } catch (e) {} flushPort = null; }
+  chrome.runtime.sendMessage({ type: 'SET_SILENT_FLUSH_ACTIVE', active: false }).catch(() => {});
+}
+
+function updateFlushConnection() {
+  if (logDirectoryHandle && logStorageConfig.logFlushEnabled !== false) connectFlushPort();
+  else disconnectFlushPort();
+}
+
+async function processAppendQueue(domain) {
+  if (domainWriting[domain] || !appendQueue[domain]?.length || !logDirectoryHandle) return;
+  domainWriting[domain] = true;
+  const log = appendQueue[domain].shift();
+  const safeDomain = domain.replace(/[^a-z0-9.-]/gi, '_');
+  const dateStr = new Date().toISOString().slice(0, 10);
+  const line = JSON.stringify(log) + '\n';
+  try {
+    const dir = await logDirectoryHandle.getDirectoryHandle(safeDomain, { create: true });
+    const baseName = `${dateStr}.ndjson`;
+    let fileHandle, currentSize = 0;
+    try { fileHandle = await dir.getFileHandle(baseName, { create: false }); const f = await fileHandle.getFile(); currentSize = f.size; } catch { fileHandle = await dir.getFileHandle(baseName, { create: true }); }
+    if (currentSize + line.length > MAX_FILE_BYTES) {
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      fileHandle = await dir.getFileHandle(`${dateStr}-${ts}.ndjson`, { create: true });
+      const w = await fileHandle.createWritable();
+      await w.write(line);
+      await w.close();
+    } else {
+      const w = await fileHandle.createWritable({ keepExistingData: true });
+      if (w.seek) await w.seek(currentSize);
+      await w.write(line);
+      await w.close();
+    }
+  } catch (e) { console.error('[Dashboard] append log', e); }
+  domainWriting[domain] = false;
+  if (appendQueue[domain]?.length) processAppendQueue(domain);
+}
+
+async function pickLogDirectory() {
+  try {
+    if (typeof showDirectoryPicker !== 'function') { alert('当前环境不支持目录选择'); return; }
+    const handle = await showDirectoryPicker();
+    logDirectoryHandle = handle;
+    updateLogPathDisplay();
+    updateFlushConnection();
+  } catch (err) { if (err.name !== 'AbortError') alert('选择目录失败: ' + (err.message || err)); }
+}
+
+function exportLogsToDisk() {
+  if (logDirectoryHandle) {
+    chrome.runtime.sendMessage({ type: 'GET_LOGS' }, async response => {
+      if (!response?.success || !response.logs?.length) { alert('暂无日志'); return; }
+      const domainEnabled = logStorageConfig.domainEnabled || {};
+      const byDomain = {};
+      for (const log of response.logs) {
+        const d = getPrimaryDomain(log.url);
+        if (domainEnabled[d] === false) continue;
+        if (!byDomain[d]) byDomain[d] = [];
+        byDomain[d].push(log);
+      }
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      let done = 0;
+      for (const [domain, arr] of Object.entries(byDomain)) {
+        if (arr.length === 0) continue;
+        const sorted = arr.slice().sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+        const safeDomain = domain.replace(/[^a-z0-9.-]/gi, '_');
+        const content = JSON.stringify({ domain, exportedAt: new Date().toISOString(), logs: sorted }, null, 2);
+        try {
+          const dir = await logDirectoryHandle.getDirectoryHandle(safeDomain, { create: true });
+          const file = await dir.getFileHandle(`${ts}.json`, { create: true });
+          const w = await file.createWritable();
+          await w.write(content);
+          await w.close();
+          done++;
+        } catch (e) { console.error('[Dashboard] write fail', e); }
+      }
+      alert(done ? `已保存 ${done} 个文件到所选目录` : '没有可导出的域名');
+    });
+  } else {
+    chrome.runtime.sendMessage({ type: 'EXPORT_LOGS_TO_FILES' }, response => {
+      if (response?.success) { if (response.count === 0) alert('没有可导出的日志，或请检查左侧域名开关'); else alert(`已导出 ${response.count} 个文件到下载目录/xhr-logs`); } else { alert(response?.message || '导出失败'); }
+    });
+  }
+}
+
+function renderLogDomainList() {
+  const byDomain = {};
+  for (const log of logs) {
+    const d = getPrimaryDomain(log.url);
+    if (!byDomain[d]) byDomain[d] = 0;
+    byDomain[d]++;
+  }
+  const enabledFirst = (a, b) => {
+    const ae = logStorageConfig.domainEnabled[a] !== false;
+    const be = logStorageConfig.domainEnabled[b] !== false;
+    if (ae !== be) return ae ? -1 : 1;
+    return a.localeCompare(b);
+  };
+  const domains = Object.keys(byDomain).sort(enabledFirst);
+  const list = $('log-domain-list');
+  if (domains.length === 0) { list.innerHTML = '<div class="log-domain-empty">暂无请求，按一级域名划分的列表将在此显示</div>'; return; }
+  list.innerHTML = domains.map(domain => {
+    const enabled = logStorageConfig.domainEnabled[domain] !== false;
+    const active = selectedLogDomain === domain ? ' active' : '';
+    return `<div class="log-domain-item${active}" data-domain="${escapeHtml(domain)}" data-action="select">
+      <div class="sub-toggle${enabled ? ' active' : ''}" data-action="log-toggle" data-domain="${escapeHtml(domain)}"></div>
+      <span class="log-domain-name">${escapeHtml(domain)}</span>
+      <span class="log-domain-count">${byDomain[domain]}</span>
+    </div>`;
+  }).join('');
+}
+
+function handleLogDomainListClick(e) {
+  const toggle = e.target.closest('[data-action="log-toggle"]');
+  if (toggle) {
+    e.stopPropagation();
+    const domain = toggle.dataset.domain;
+    const item = toggle.closest('.log-domain-item');
+    const next = !item.querySelector('.sub-toggle.active');
+    chrome.runtime.sendMessage({ type: 'SET_DOMAIN_LOG_ENABLED', domain, enabled: next }, response => {
+      if (response?.success) { logStorageConfig.domainEnabled = logStorageConfig.domainEnabled || {}; logStorageConfig.domainEnabled[domain] = next; renderLogDomainList(); renderLogByDomainList(); }
+    });
+    return;
+  }
+  const row = e.target.closest('.log-domain-item');
+  if (row && !e.target.closest('[data-action="log-toggle"]')) {
+    selectedLogDomain = row.dataset.domain;
+    renderLogDomainList();
+    renderLogByDomainList();
+    const title = $('log-detail-title');
+    if (title) title.textContent = selectedLogDomain ? `详细日志: ${selectedLogDomain}` : '按域名的详细日志';
+  }
+}
+
+function logRowDetailHtml(log) {
+  const statusClass = log.status >= 500 ? 'status-5xx' : log.status >= 400 ? 'status-4xx' : log.status >= 300 ? 'status-3xx' : 'status-2xx';
+  const formatJson = str => { try { return escapeHtml(JSON.stringify(JSON.parse(str), null, 2)); } catch { return escapeHtml(str) || '(空)'; } };
+  const headersTable = headers => {
+    const entries = Object.entries(headers || {});
+    return entries.length === 0 ? '<p style="color: var(--text-muted);">(无)</p>' : `<table class="headers-table"><tbody>${entries.map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(v)}</td></tr>`).join('')}</tbody></table>`;
+  };
+  const respSize = formatSize(typeof (log.responseBody || '') === 'string' ? (log.responseBody || '').length : 0);
+  return `<div class="log-row-detail-inner">
+    <div class="detail-url-wrapper"><span class="detail-url">${escapeHtml(log.url)}</span></div>
+    <div class="detail-meta">
+      <div class="detail-meta-item"><span class="detail-meta-label">方法</span><span class="method-badge method-${log.method}">${log.method}</span></div>
+      <div class="detail-meta-item"><span class="detail-meta-label">状态</span><span class="status-badge ${statusClass}">${log.status}</span></div>
+      <div class="detail-meta-item"><span class="detail-meta-label">耗时</span><span class="detail-meta-value">${log.duration}ms</span></div>
+      <div class="detail-meta-item"><span class="detail-meta-label">大小</span><span class="detail-meta-value">${respSize}</span></div>
+      <div class="detail-meta-item"><span class="detail-meta-label">时间</span><span class="detail-meta-value">${new Date(log.timestamp).toLocaleString()}</span></div>
+    </div>
+    <div class="detail-section"><div class="detail-section-header" data-action="toggle"><span class="detail-section-title">📤 Request Headers</span><span class="detail-section-toggle">▼</span></div><div class="detail-section-content">${headersTable(log.requestHeaders)}</div></div>
+    <div class="detail-section"><div class="detail-section-header" data-action="toggle"><span class="detail-section-title">📝 Request Body</span><button class="copy-btn" data-action="copy" data-text="${encodeURIComponent(log.requestBody || '')}">复制</button></div><div class="detail-section-content">${formatJson(log.requestBody)}</div></div>
+    <div class="detail-section"><div class="detail-section-header" data-action="toggle"><span class="detail-section-title">📥 Response Headers</span><span class="detail-section-toggle">▼</span></div><div class="detail-section-content">${headersTable(log.responseHeaders)}</div></div>
+    <div class="detail-section"><div class="detail-section-header" data-action="toggle"><span class="detail-section-title">📄 Response Body</span><button class="copy-btn" data-action="copy" data-text="${encodeURIComponent(log.responseBody || '')}">复制</button></div><div class="detail-section-content">${formatJson(log.responseBody)}</div></div>
+  </div>`;
+}
+
+function handleLogByDomainRowClick(e) {
+  const copyBtn = e.target.closest('[data-action="copy"]');
+  if (copyBtn) { e.stopPropagation(); navigator.clipboard.writeText(decodeURIComponent(copyBtn.dataset.text || '')).then(() => { copyBtn.textContent = '已复制'; setTimeout(() => copyBtn.textContent = '复制', 1500); }); return; }
+  const sectionHeader = e.target.closest('.detail-section-header[data-action="toggle"]');
+  if (sectionHeader) { e.stopPropagation(); const content = sectionHeader.nextElementSibling; if (content) { content.classList.toggle('collapsed'); const t = sectionHeader.querySelector('.detail-section-toggle'); if (t) t.textContent = content.classList.contains('collapsed') ? '▶' : '▼'; } return; }
+  const row = e.target.closest('.log-row');
+  if (!row) return;
+  const id = parseInt(row.dataset.id);
+  expandedLogIdInDetail = expandedLogIdInDetail === id ? null : id;
+  renderLogByDomainList();
+}
+
+function renderLogByDomainList() {
+  const list = $('log-by-domain-list');
+  const title = $('log-detail-title');
+  if (title) title.textContent = selectedLogDomain ? `详细日志: ${selectedLogDomain}` : '按域名的详细日志';
+  if (!selectedLogDomain) { list.innerHTML = '<div class="log-domain-empty">在左侧选择一个域名</div>'; return; }
+  const arr = logs.filter(l => getPrimaryDomain(l.url) === selectedLogDomain).sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+  if (arr.length === 0) { list.innerHTML = '<div class="log-domain-empty">该域名暂无日志</div>'; return; }
+  list.innerHTML = arr.map(log => {
+    const statusClass = log.status >= 500 ? 'status-5xx' : log.status >= 400 ? 'status-4xx' : log.status >= 300 ? 'status-3xx' : 'status-2xx';
+    const time = new Date(log.timestamp).toLocaleTimeString();
+    const path = (() => { try { return new URL(log.url).pathname + new URL(log.url).search; } catch { return log.url; } })();
+    const expanded = expandedLogIdInDetail === log.id;
+    const detailHtml = expanded ? logRowDetailHtml(log) : '';
+    return `<div class="log-row-wrap${expanded ? ' expanded' : ''}" data-id="${log.id}">
+      <div class="log-row" data-id="${log.id}"><span class="log-row-expand">${expanded ? '▼' : '▶'}</span><span class="method-badge method-${log.method}">${log.method}</span><span class="status-badge ${statusClass}">${log.status}</span><span class="log-row-url" title="${escapeHtml(log.url)}">${escapeHtml(path)}</span><span class="log-row-time">${time}</span></div>
+      ${detailHtml ? `<div class="log-row-detail">${detailHtml}</div>` : ''}
+    </div>`;
+  }).join('');
 }
 
 document.addEventListener('DOMContentLoaded', init);

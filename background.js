@@ -2,7 +2,77 @@
 let logs = [];
 let isPaused = false;
 let logIdCounter = 0;
+let lastFlushedLogId = 0;
+let dashboardFlushPort = null;
+const MAX_FILE_BYTES = 10 * 1024 * 1024;
 console.log('[Background] XHR Logger started');
+
+chrome.runtime.onConnect.addListener(port => {
+  if (port.name !== 'log-flush') return;
+  dashboardFlushPort = port;
+  port.onDisconnect.addListener(() => { dashboardFlushPort = null; chrome.storage.local.set({ silentFlushActive: false }); });
+});
+
+// ==================== 一级域名 ====================
+function getPrimaryDomain(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (host === 'localhost' || host.startsWith('127.')) return host;
+    const parts = host.split('.');
+    if (parts.length >= 2) return parts.slice(-2).join('.');
+    return host;
+  } catch { return 'unknown'; }
+}
+
+// ==================== 日志落盘配置 ====================
+const LOG_STORAGE_CONFIG_DEFAULTS = { defaultPath: 'xhr-logs', domainEnabled: {}, logFlushEnabled: false };
+async function getLogStorageConfig() {
+  const { logStorageConfig } = await chrome.storage.local.get('logStorageConfig');
+  return Object.assign({}, LOG_STORAGE_CONFIG_DEFAULTS, logStorageConfig || {}, { domainEnabled: Object.assign({}, (logStorageConfig || {}).domainEnabled) });
+}
+
+async function saveLogStorageConfig(config) {
+  await chrome.storage.local.set({ logStorageConfig: config });
+}
+
+async function setDomainLogEnabled(domain, enabled) {
+  const config = await getLogStorageConfig();
+  config.domainEnabled = config.domainEnabled || {};
+  config.domainEnabled[domain] = enabled;
+  await saveLogStorageConfig(config);
+  return { success: true };
+}
+
+function getLogsSinceLastFlush() {
+  const out = logs.filter(l => l.id > lastFlushedLogId);
+  const maxId = out.length ? Math.max(...out.map(l => l.id)) : lastFlushedLogId;
+  return { logs: out, maxId };
+}
+
+async function exportLogsToFiles() {
+  const config = await getLogStorageConfig();
+  const basePath = (config.defaultPath || 'xhr-logs').replace(/\/+$/, '').replace(/^\/+/, '') || 'xhr-logs';
+  const domainEnabled = config.domainEnabled || {};
+  const byDomain = {};
+  for (const log of logs) {
+    const domain = getPrimaryDomain(log.url);
+    if (domainEnabled[domain] === false) continue;
+    if (!byDomain[domain]) byDomain[domain] = [];
+    byDomain[domain].push(log);
+  }
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  let done = 0;
+  for (const [domain, domainLogs] of Object.entries(byDomain)) {
+    if (domainLogs.length === 0) continue;
+    const sorted = domainLogs.slice().sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    const safeDomain = domain.replace(/[^a-z0-9.-]/gi, '_');
+    const content = JSON.stringify({ domain, exportedAt: new Date().toISOString(), logs: sorted }, null, 2);
+    const base64 = btoa(unescape(encodeURIComponent(content)));
+    await chrome.downloads.download({ url: `data:application/json;base64,${base64}`, filename: `${basePath}/${safeDomain}-${ts}.json`, saveAs: false });
+    done++;
+  }
+  return { success: true, count: done };
+}
 
 // ==================== 订阅管理 ====================
 const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
@@ -123,9 +193,10 @@ async function checkPageSubscription(pageUrl, updateMatch = false) {
 }
 
 // ==================== 配置管理 ====================
+const COLLECTOR_CONFIG_DEFAULTS = { endpoint: 'https://localhost:8443/collect', enabled: true };
 async function getCollectorConfig() {
   const { collectorConfig } = await chrome.storage.local.get('collectorConfig');
-  return collectorConfig || { endpoint: 'https://localhost:8443/collect', enabled: true };
+  return Object.assign({}, COLLECTOR_CONFIG_DEFAULTS, collectorConfig || {});
 }
 
 async function saveCollectorConfig(config) {
@@ -231,8 +302,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (sender.tab) logData.tabId = sender.tab.id;
       logs.push(logData);
       console.log(`[Background] ✅ ${logs.length} | ${logData.method} ${logData.url}`);
-      // 检查 API 订阅并自动保存
       checkApiSubscription(logData);
+      getLogStorageConfig().then(config => {
+        if (config.logFlushEnabled !== false && dashboardFlushPort && config.domainEnabled?.[getPrimaryDomain(logData.url)] !== false)
+          try { dashboardFlushPort.postMessage({ type: 'APPEND_LOG', log: logData }); } catch (e) {}
+      });
       sendResponse({ success: true });
       break;
     case 'GET_LOGS':
@@ -240,12 +314,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
     case 'SET_PAUSE':
       isPaused = message.paused;
+      chrome.storage.local.set({ pauseState: { paused: isPaused } });
       console.log(`[Background] ${isPaused ? '⏸️ 暂停监听' : '▶️ 继续监听'}`);
       sendResponse({ success: true, isPaused });
       break;
     case 'GET_PAUSE_STATE':
-      sendResponse({ success: true, isPaused });
-      break;
+      chrome.storage.local.get('pauseState').then(({ pauseState }) => {
+        if (pauseState && typeof pauseState.paused === 'boolean') isPaused = pauseState.paused;
+        sendResponse({ success: true, isPaused });
+      });
+      return true;
     case 'SAVE_TO_FILE':
       saveToFile().then(sendResponse);
       return true;
@@ -292,10 +370,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'SAVE_COLLECTOR_CONFIG':
       saveCollectorConfig(message.config).then(() => sendResponse({ success: true }));
       return true;
+    case 'GET_LOG_STORAGE_CONFIG':
+      getLogStorageConfig().then(c => sendResponse({ success: true, config: c }));
+      return true;
+    case 'SAVE_LOG_STORAGE_CONFIG':
+      saveLogStorageConfig(message.config).then(() => sendResponse({ success: true }));
+      return true;
+    case 'SET_DOMAIN_LOG_ENABLED':
+      setDomainLogEnabled(message.domain, message.enabled).then(sendResponse);
+      return true;
+    case 'EXPORT_LOGS_TO_FILES':
+      exportLogsToFiles().then(sendResponse);
+      return true;
+    case 'GET_LOGS_SINCE_LAST_FLUSH': {
+      const { logs: sinceLogs, maxId } = getLogsSinceLastFlush();
+      sendResponse({ success: true, logs: sinceLogs, maxId });
+      break;
+    }
+    case 'SET_LAST_FLUSHED_ID':
+      lastFlushedLogId = Math.max(lastFlushedLogId, message.id || 0);
+      sendResponse({ success: true });
+      break;
+    case 'SET_SILENT_FLUSH_ACTIVE':
+      chrome.storage.local.set({ silentFlushActive: !!message.active }).then(() => sendResponse({ success: true }));
+      return true;
+    case 'SET_LOG_FLUSH_ENABLED':
+      getLogStorageConfig().then(c => { c.logFlushEnabled = !!message.enabled; saveLogStorageConfig(c).then(() => sendResponse({ success: true })); });
+      return true;
     default:
       sendResponse({ success: false, message: 'Unknown message type' });
   }
 });
+
+chrome.storage.local.get('pauseState').then(({ pauseState }) => { if (pauseState?.paused === true) isPaused = true; });
 
 chrome.runtime.onInstalled.addListener(details => {
   console.log('[Background] Extension', details.reason);

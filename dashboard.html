@@ -14,6 +14,7 @@
         <div class="tabs">
           <button class="tab active" data-tab="monitor">📊 看板</button>
           <button class="tab" data-tab="subscriptions">📌 订阅管理</button>
+          <button class="tab" data-tab="logs">📋 日志管理</button>
         </div>
       </div>
       <div class="header-right" id="monitor-controls">
@@ -46,6 +47,15 @@
         <button id="add-sub-btn" class="btn btn-primary">+ 新增订阅</button>
         <input type="file" id="import-file-input" accept=".json" style="display:none">
       </div>
+      <div class="header-right hidden" id="log-controls">
+        <label class="log-flush-toggle-wrap">
+          <span class="log-path-label">启用落盘</span>
+          <span class="sub-toggle" id="log-flush-enabled-toggle"></span>
+        </label>
+        <span class="log-path-label" id="log-path-display">默认: 下载目录/xhr-logs</span>
+        <button id="log-pick-dir-btn" class="btn btn-secondary">选择目录</button>
+        <button id="log-export-disk-btn" class="btn btn-primary">保存到本地</button>
+      </div>
     </header>
     
     <!-- 看板 Tab -->
@@ -67,6 +77,18 @@
         <div class="subscription-form" id="subscription-form">
           <div class="form-placeholder">选择一个订阅查看详情，或点击「新增订阅」创建</div>
         </div>
+      </div>
+    </main>
+
+    <!-- 日志管理 Tab -->
+    <main class="main tab-content" id="tab-logs">
+      <div class="log-domain-panel" id="log-domain-panel">
+        <div class="panel-header">按域名记录</div>
+        <div class="log-domain-list" id="log-domain-list"></div>
+      </div>
+      <div class="log-detail-panel" id="log-detail-panel">
+        <div class="panel-header" id="log-detail-title">按域名的详细日志</div>
+        <div class="log-by-domain-list" id="log-by-domain-list"></div>
       </div>
     </main>
   </div>
