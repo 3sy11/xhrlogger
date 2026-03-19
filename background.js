@@ -25,7 +25,8 @@ function getPrimaryDomain(url) {
 }
 
 // ==================== 日志落盘配置 ====================
-const LOG_STORAGE_CONFIG_DEFAULTS = { defaultPath: 'xhr-logs', domainEnabled: {}, logFlushEnabled: false };
+const LOG_STORAGE_CONFIG_DEFAULTS = { defaultPath: 'xhrlog', domainEnabled: {}, logFlushEnabled: false };
+const FLUSH_INTERVAL_MS = 5000;
 async function getLogStorageConfig() {
   const { logStorageConfig } = await chrome.storage.local.get('logStorageConfig');
   return Object.assign({}, LOG_STORAGE_CONFIG_DEFAULTS, logStorageConfig || {}, { domainEnabled: Object.assign({}, (logStorageConfig || {}).domainEnabled) });
@@ -49,9 +50,60 @@ function getLogsSinceLastFlush() {
   return { logs: out, maxId };
 }
 
+async function flushLogsToDefaultPath() {
+  const [{ silentFlushActive }, config] = await Promise.all([chrome.storage.local.get('silentFlushActive'), getLogStorageConfig()]);
+  if (config.logFlushEnabled === false || silentFlushActive) return;
+  const domainEnabled = config.domainEnabled || {};
+  const since = logs.filter(l => l.id > lastFlushedLogId);
+  if (since.length === 0) return;
+  const byDomain = {};
+  for (const log of since) {
+    const domain = getPrimaryDomain(log.url);
+    if (domainEnabled[domain] === false) continue;
+    if (!byDomain[domain]) byDomain[domain] = [];
+    byDomain[domain].push(log);
+  }
+  const basePath = (config.defaultPath || 'xhrlog').replace(/\/+$/, '').replace(/^\/+/, '') || 'xhrlog';
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  let maxId = lastFlushedLogId;
+  for (const [domain, domainLogs] of Object.entries(byDomain)) {
+    if (domainLogs.length === 0) continue;
+    const sorted = domainLogs.slice().sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    const safeDomain = domain.replace(/[^a-z0-9.-]/gi, '_');
+    const raw = JSON.stringify({ domain, exportedAt: new Date().toISOString(), logs: sorted });
+    if (raw.length <= MAX_FILE_BYTES) {
+      const filename = `${basePath}/${safeDomain}/${ts}.ndjson`;
+      const lines = sorted.map(l => JSON.stringify(l)).join('\n') + '\n';
+      const base64 = btoa(unescape(encodeURIComponent(lines)));
+      await chrome.downloads.download({ url: `data:application/json;base64,${base64}`, filename, saveAs: false });
+      maxId = Math.max(maxId, ...sorted.map(l => l.id));
+    } else {
+      let offset = 0, part = 0;
+      while (offset < sorted.length) {
+        let low = offset, high = sorted.length;
+        while (low < high) {
+          const mid = (low + high + 1) >>> 1;
+          const slice = sorted.slice(offset, mid);
+          const s = slice.map(l => JSON.stringify(l)).join('\n') + '\n';
+          if (s.length <= MAX_FILE_BYTES) low = mid; else high = mid - 1;
+        }
+        const chunk = sorted.slice(offset, low);
+        offset = low;
+        part++;
+        const lines = chunk.map(l => JSON.stringify(l)).join('\n') + '\n';
+        const filename = `${basePath}/${safeDomain}/${ts}-${part}.ndjson`;
+        const base64 = btoa(unescape(encodeURIComponent(lines)));
+        await chrome.downloads.download({ url: `data:application/json;base64,${base64}`, filename, saveAs: false });
+        maxId = Math.max(maxId, ...chunk.map(l => l.id));
+      }
+    }
+  }
+  lastFlushedLogId = Math.max(lastFlushedLogId, maxId);
+}
+
 async function exportLogsToFiles() {
   const config = await getLogStorageConfig();
-  const basePath = (config.defaultPath || 'xhr-logs').replace(/\/+$/, '').replace(/^\/+/, '') || 'xhr-logs';
+  const basePath = (config.defaultPath || 'xhrlog').replace(/\/+$/, '').replace(/^\/+/, '') || 'xhrlog';
   const domainEnabled = config.domainEnabled || {};
   const byDomain = {};
   for (const log of logs) {
@@ -403,6 +455,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.storage.local.get('pauseState').then(({ pauseState }) => { if (pauseState?.paused === true) isPaused = true; });
+
+setInterval(flushLogsToDefaultPath, FLUSH_INTERVAL_MS);
 
 chrome.runtime.onInstalled.addListener(details => {
   console.log('[Background] Extension', details.reason);

@@ -1,9 +1,10 @@
 // XHR Logger - Dashboard
 let logs = [], filteredLogs = [], selectedLogId = null, isPaused = false, refreshTimer = null;
 let subscriptions = [], selectedSubId = null, isNewSub = false;
-let logStorageConfig = { defaultPath: 'xhr-logs', domainEnabled: {}, logFlushEnabled: false };
+let logStorageConfig = { defaultPath: 'xhrlog', domainEnabled: {}, logFlushEnabled: false };
 let selectedLogDomain = null;
 let logDirectoryHandle = null;
+let loadedLogsByDomain = {};
 let expandedLogIdInDetail = null;
 let flushPort = null;
 const appendQueue = {};
@@ -559,15 +560,17 @@ function saveCollectorConfig() {
 
 function loadLogStorageConfig() {
   chrome.runtime.sendMessage({ type: 'GET_LOG_STORAGE_CONFIG' }, response => {
-    if (response?.success) { logStorageConfig = response.config || { defaultPath: 'xhr-logs', domainEnabled: {}, logFlushEnabled: false }; updateLogPathDisplay(); updateLogFlushToggle(); renderLogDomainList(); renderLogByDomainList(); updateFlushConnection(); }
+    if (response?.success) { logStorageConfig = response.config || { defaultPath: 'xhrlog', domainEnabled: {}, logFlushEnabled: false }; updateLogPathDisplay(); updateLogFlushToggle(); renderLogDomainList(); renderLogByDomainList(); updateFlushConnection(); }
   });
 }
 
 function updateLogPathDisplay() {
   const el = $('log-path-display');
   if (!el) return;
+  const pathName = (logStorageConfig.defaultPath || 'xhrlog').trim() || 'xhrlog';
   if (logDirectoryHandle) el.textContent = `已选目录: ${logDirectoryHandle.name}`;
-  else el.textContent = logStorageConfig.logFlushEnabled !== false ? '请选择目录以开始落盘' : '默认: 下载目录/xhr-logs';
+  else if (logStorageConfig.logFlushEnabled !== false) el.textContent = `落盘: 下载目录/${pathName}`;
+  else el.textContent = `默认: 下载目录/${pathName}`;
 }
 
 function updateLogFlushToggle() {
@@ -585,7 +588,6 @@ function toggleLogFlushEnabled(e) {
     updateLogFlushToggle();
     updateFlushConnection();
     updateLogPathDisplay();
-    if (next && !logDirectoryHandle) alert('请点击「选择目录」指定落盘位置后，落盘才会开始。');
   });
 }
 
@@ -638,13 +640,45 @@ async function processAppendQueue(domain) {
   if (appendQueue[domain]?.length) processAppendQueue(domain);
 }
 
+async function loadLogsFromDirectory(dirHandle) {
+  const result = {};
+  try {
+    for await (const [name, handle] of dirHandle.entries()) {
+      if (handle.kind !== 'directory') continue;
+      const domain = name;
+      const list = [];
+      try {
+        for await (const [fname, fhandle] of handle.entries()) {
+          if (fhandle.kind !== 'file' || !fname.endsWith('.ndjson')) continue;
+          const file = await fhandle.getFile();
+          const text = await file.text();
+          const lines = text.split('\n').filter(Boolean);
+          for (let i = 0; i < lines.length; i++) {
+            try {
+              const log = JSON.parse(lines[i]);
+              if (!log.url) continue;
+              log.id = log.id || `loaded-${domain}-${list.length}`;
+              list.push(log);
+            } catch (e) {}
+          }
+        }
+      } catch (e) {}
+      if (list.length) result[domain] = list.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    }
+  } catch (e) { console.error('[Dashboard] load from dir', e); }
+  return result;
+}
+
 async function pickLogDirectory() {
   try {
     if (typeof showDirectoryPicker !== 'function') { alert('当前环境不支持目录选择'); return; }
     const handle = await showDirectoryPicker();
+    loadedLogsByDomain = await loadLogsFromDirectory(handle);
     logDirectoryHandle = handle;
     updateLogPathDisplay();
     updateFlushConnection();
+    renderLogDomainList();
+    renderLogByDomainList();
   } catch (err) { if (err.name !== 'AbortError') alert('选择目录失败: ' + (err.message || err)); }
 }
 
@@ -691,6 +725,9 @@ function renderLogDomainList() {
     const d = getPrimaryDomain(log.url);
     if (!byDomain[d]) byDomain[d] = 0;
     byDomain[d]++;
+  }
+  for (const [domain, arr] of Object.entries(loadedLogsByDomain)) {
+    byDomain[domain] = (byDomain[domain] || 0) + arr.length;
   }
   const enabledFirst = (a, b) => {
     const ae = logStorageConfig.domainEnabled[a] !== false;
@@ -765,7 +802,7 @@ function handleLogByDomainRowClick(e) {
   if (sectionHeader) { e.stopPropagation(); const content = sectionHeader.nextElementSibling; if (content) { content.classList.toggle('collapsed'); const t = sectionHeader.querySelector('.detail-section-toggle'); if (t) t.textContent = content.classList.contains('collapsed') ? '▶' : '▼'; } return; }
   const row = e.target.closest('.log-row');
   if (!row) return;
-  const id = parseInt(row.dataset.id);
+  const id = row.dataset.id;
   expandedLogIdInDetail = expandedLogIdInDetail === id ? null : id;
   renderLogByDomainList();
 }
@@ -775,7 +812,9 @@ function renderLogByDomainList() {
   const title = $('log-detail-title');
   if (title) title.textContent = selectedLogDomain ? `详细日志: ${selectedLogDomain}` : '按域名的详细日志';
   if (!selectedLogDomain) { list.innerHTML = '<div class="log-domain-empty">在左侧选择一个域名</div>'; return; }
-  const arr = logs.filter(l => getPrimaryDomain(l.url) === selectedLogDomain).sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+  const memory = logs.filter(l => getPrimaryDomain(l.url) === selectedLogDomain);
+  const loaded = loadedLogsByDomain[selectedLogDomain] || [];
+  const arr = [...memory, ...loaded].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
   if (arr.length === 0) { list.innerHTML = '<div class="log-domain-empty">该域名暂无日志</div>'; return; }
   list.innerHTML = arr.map(log => {
     const statusClass = log.status >= 500 ? 'status-5xx' : log.status >= 400 ? 'status-4xx' : log.status >= 300 ? 'status-3xx' : 'status-2xx';
